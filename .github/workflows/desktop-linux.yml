@@ -103,15 +103,19 @@ jobs:
             echo "no AppImage or deb produced under $BUNDLE_DIR"
             exit 1
           fi
-          # Updater artifacts must be signed or the feed cannot serve them.
+          # The v2 updater serves the AppImage itself: require the binary
+          # plus its minisign sidecar (emitted when the signing key works).
           shopt -s nullglob
-          TARBALLS=("$BUNDLE_DIR/appimage/"*.AppImage.tar.gz)
-          if [ ${#TARBALLS[@]} -eq 0 ]; then
-            echo "no AppImage updater tarball produced (updater overlay/key issue?)"
+          APPS=("$BUNDLE_DIR/appimage/"*.AppImage)
+          if [ ${#APPS[@]} -eq 0 ]; then
+            echo "no AppImage produced (bundler issue?)"
             exit 1
           fi
-          for f in "${TARBALLS[@]}"; do
-            [ -s "$f.sig" ] || { echo "missing signature for $f"; exit 1; }
+          for f in "${APPS[@]}"; do
+            case "$f" in
+              *.tar.gz) continue ;;
+            esac
+            [ -s "$f.sig" ] || { echo "missing updater signature for $f"; exit 1; }
           done
 
       - name: Upload artifacts

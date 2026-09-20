@@ -154,25 +154,22 @@ jobs:
           mkdir -p "$OUT"
           DEB=$(find "$BUNDLE_DIR/deb" -name '*.deb' -print -quit)
           APP=$(find "$BUNDLE_DIR/appimage" -name '*.AppImage' ! -name '*.tar.gz' -print -quit)
-          TAR=$(find "$BUNDLE_DIR/appimage" -name '*.AppImage.tar.gz' -print -quit)
           [ -n "$DEB" ] || { echo "no deb produced"; exit 1; }
           [ -n "$APP" ] || { echo "no AppImage produced"; exit 1; }
-          [ -n "$TAR" ] || { echo "no AppImage updater tarball produced (overlay/key issue?)"; exit 1; }
-          [ -s "$TAR.sig" ] || { echo "missing updater signature for $TAR"; exit 1; }
+          [ -s "$APP.sig" ] || { echo "missing updater signature for $APP"; exit 1; }
           # Unversioned names keep site links evergreen across releases; the
-          # versioned updater tarball + sig stay versioned for the feed.
+          # manifest reads the sig sitting next to the file it serves.
           cp "$DEB" "$OUT/Cline_amd64.deb"
           cp "$APP" "$OUT/Cline_amd64.AppImage"
-          cp "$TAR" "$OUT/"
-          cp "$TAR.sig" "$OUT/"
-          (cd "$OUT" && sha256sum Cline_amd64.deb Cline_amd64.AppImage *.AppImage.tar.gz > SHA256SUMS)
+          cp "$APP.sig" "$OUT/Cline_amd64.AppImage.sig"
+          (cd "$OUT" && sha256sum Cline_amd64.deb Cline_amd64.AppImage Cline_amd64.AppImage.sig > SHA256SUMS)
           TAG="desktop-linux-v$VERSION"
           git tag "$TAG"
           git push origin "$TAG"
           gh release create "$TAG" --target linux-desktop \
             --title "Cline Desktop for Linux v$VERSION" \
             --notes "Auto-built from upstream \`desktop-v$VERSION\` plus the linux-desktop pipeline. Install: \`sudo apt install ./Cline_amd64.deb\` or \`chmod +x Cline_amd64.AppImage && ./Cline_amd64.AppImage\`. Verify with SHA256SUMS. Installed apps auto-update from the linux-latest feed." \
-            "$OUT/Cline_amd64.deb" "$OUT/Cline_amd64.AppImage" "$OUT/$(basename "$TAR")" "$OUT/$(basename "$TAR").sig" "$OUT/SHA256SUMS"
+            "$OUT/Cline_amd64.deb" "$OUT/Cline_amd64.AppImage" "$OUT/Cline_amd64.AppImage.sig" "$OUT/SHA256SUMS"
 
       - name: Refresh linux-latest updater feed
         if: steps.detect.outputs.pending != ''
