@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   build-linux-x64:
-    name: Build Linux (x64, AppImage + deb)
+    name: Build Linux (x64, deb)
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
@@ -69,22 +69,22 @@ jobs:
 
       - name: Build Linux desktop bundles
         working-directory: apps/examples/desktop-app
-        # Belt and braces with libfuse2 above: extract-and-run in case the
-        # runner's /dev/fuse is unavailable.
+        # deb-only for now: AppImage bundling dies in `failed to run
+        # linuxdeploy` with no stderr (see #5). Retry AppImage with
+        # `tauri build -v` to surface bundler stderr. FUSE lines stay:
+        # linuxdeploy needs them whenever AppImage returns.
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
-        run: bunx tauri build --bundles appimage,deb
+        run: bunx tauri build --bundles deb
 
       - name: Verify Linux artifacts
         working-directory: apps/examples/desktop-app
         run: |
           BUNDLE_DIR="src-tauri/target/release/bundle"
-          echo "--- appimage ---"
-          ls -lh "$BUNDLE_DIR/appimage" || echo "no appimage dir"
           echo "--- deb ---"
           ls -lh "$BUNDLE_DIR/deb" || echo "no deb dir"
-          if ! ls "$BUNDLE_DIR/appimage/"*.AppImage >/dev/null 2>&1 && ! ls "$BUNDLE_DIR/deb/"*.deb >/dev/null 2>&1; then
-            echo "no AppImage or deb produced under $BUNDLE_DIR"
+          if ! ls "$BUNDLE_DIR/deb/"*.deb >/dev/null 2>&1; then
+            echo "no deb produced under $BUNDLE_DIR"
             exit 1
           fi
 
@@ -94,6 +94,5 @@ jobs:
           name: desktop-linux-x64
           retention-days: 30
           path: |
-            apps/examples/desktop-app/src-tauri/target/release/bundle/appimage/*.AppImage
             apps/examples/desktop-app/src-tauri/target/release/bundle/deb/*.deb
           if-no-files-found: error
