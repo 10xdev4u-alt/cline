@@ -1,4 +1,3 @@
-import { chmod } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { $ } from "bun";
 import { telemetryDefineArgs } from "./telemetry-define-args";
@@ -110,12 +109,6 @@ const compressRemoteHelper = async (outfile: string): Promise<void> => {
 // already exists, so seed those two files from the @oven/bun-<target> npm
 // packages first; desktop-publish.yml does exactly that in its Windows job.
 const buildRemoteHelpers = async (): Promise<void> => {
-	// Remote helpers are SSH payload, never host-executed: the remote side
-	// chmods explicitly before launch. A foreign-arch helper that keeps +x
-	// aborts Linux AppImage bundling (linuxdeploy's gtk plugin ldds every
-	// executable in the AppDir and dies on unrunnable ELFs), so drop the
-	// exec bit from helpers that cannot run on this host.
-	const hostArchPrefix = process.arch === "arm64" ? "aarch64" : "x86_64";
 	for (const targetTriple of [
 		"x86_64-unknown-linux-gnu",
 		"aarch64-unknown-linux-gnu",
@@ -126,9 +119,7 @@ const buildRemoteHelpers = async (): Promise<void> => {
 			"../../../sdk/packages/core/dist/remote/remote-helper-entry.js",
 			true,
 		);
-		if (!targetTriple.startsWith(hostArchPrefix)) {
-			await chmod(outfile, 0o644);
-		}
+		await compressRemoteHelper(outfile);
 	}
 };
 

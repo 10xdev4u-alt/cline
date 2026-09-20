@@ -67,11 +67,22 @@ jobs:
       - name: Build SDK packages
         run: bun run build:sdk
 
+      - name: Install ldd shim for payload binaries
+        # linuxdeploy ldds every AppDir executable and aborts the bundle on
+        # any nonzero exit. Bun-compiled payloads fail Ubuntu 22.04's ldd
+        # (see scripts/ci/ldd-payload-shim.sh); the shim masks exactly those.
+        run: |
+          chmod +x apps/examples/desktop-app/scripts/ci/ldd-payload-shim.sh
+          mkdir -p "${RUNNER_TEMP}/ldd-shim"
+          cp apps/examples/desktop-app/scripts/ci/ldd-payload-shim.sh "${RUNNER_TEMP}/ldd-shim/ldd"
+          chmod +x "${RUNNER_TEMP}/ldd-shim/ldd"
+          "${RUNNER_TEMP}/ldd-shim/ldd" --version
+          echo "${RUNNER_TEMP}/ldd-shim" >> "$GITHUB_PATH"
+
       - name: Build Linux desktop bundles
         working-directory: apps/examples/desktop-app
-        # Foreign-arch remote helpers ship without +x (see
-        # build-sidecar-bin.ts): linuxdeploy's gtk plugin ldds every
-        # executable in the AppDir and aborts on unrunnable ELFs.
+        # The ldd shim (installed above) masks Bun-compiled payload binaries
+        # from linuxdeploy's ldd pass; everything else deploys normally.
         # FUSE lines stay: linuxdeploy needs them whenever AppImage builds.
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
