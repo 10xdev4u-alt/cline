@@ -43,9 +43,10 @@ const WINDOWS_PLATFORM_KEYS_BY_ARCH_SUFFIX: Record<string, string[]> = {
 	arm64: ["windows-aarch64"],
 };
 
-// On Linux the updater artifact is the AppImage tarball
-// (`<Product>_<version>_<arch>.AppImage.tar.gz` plus a `.sig` sidecar),
-// emitted when the updater signing key is present at build time.
+// On Linux the v2 updater serves the AppImage itself
+// (`<Product>_<version>_<arch>.AppImage` plus a `.sig` sidecar, both
+// emitted when the updater signing key is present at build time).
+// (The `.AppImage.tar.gz` path is legacy v1-compat only.)
 const LINUX_PLATFORM_KEYS_BY_ARCH_SUFFIX: Record<string, string[]> = {
 	amd64: ["linux-x86_64"],
 	x86_64: ["linux-x86_64"],
@@ -78,7 +79,7 @@ const platformKeysOfUpdaterArtifact = (
 		);
 		return arch ? WINDOWS_PLATFORM_KEYS_BY_ARCH_SUFFIX[arch] : undefined;
 	}
-	if (fileName.endsWith(".AppImage.tar.gz")) {
+	if (fileName.endsWith(".AppImage") && !fileName.endsWith(".AppImage.tar.gz")) {
 		const arch = Object.keys(LINUX_PLATFORM_KEYS_BY_ARCH_SUFFIX).find(
 			(candidate) => fileName.includes(`_${candidate}.`),
 		);
