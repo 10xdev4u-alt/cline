@@ -69,13 +69,13 @@ jobs:
 
       - name: Build Linux desktop bundles
         working-directory: apps/examples/desktop-app
-        # The linux overlay scopes bundle resources to x86_64 (see
-        # tauri.linux.conf.json): foreign-arch remote helpers break
-        # linuxdeploy's ldd pass and fail the AppImage bundle.
+        # Foreign-arch remote helpers ship without +x (see
+        # build-sidecar-bin.ts): linuxdeploy's gtk plugin ldds every
+        # executable in the AppDir and aborts on unrunnable ELFs.
         # FUSE lines stay: linuxdeploy needs them whenever AppImage builds.
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
-        run: bunx tauri build --bundles appimage,deb --config src-tauri/tauri.linux.conf.json
+        run: bunx tauri build --bundles appimage,deb
 
       - name: Verify Linux artifacts
         working-directory: apps/examples/desktop-app
