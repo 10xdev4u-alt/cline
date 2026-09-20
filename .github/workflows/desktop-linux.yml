@@ -96,3 +96,14 @@ jobs:
           path: |
             apps/examples/desktop-app/src-tauri/target/release/bundle/deb/*.deb
           if-no-files-found: error
+
+      # Diagnostics for #5: AppImage bundling dies silently in
+      # `failed to run linuxdeploy`. Same filesystem, so the release build
+      # above is reused; `-v` should surface the underlying stderr.
+      # Allowed to fail until the root cause is fixed.
+      - name: Probe AppImage bundling (diagnostic)
+        working-directory: apps/examples/desktop-app
+        continue-on-error: true
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: bunx tauri build -v --bundles appimage
