@@ -83,10 +83,13 @@ jobs:
         working-directory: apps/examples/desktop-app
         # The ldd shim (installed above) masks Bun-compiled payload binaries
         # from linuxdeploy's ldd pass; everything else deploys normally.
+        # The updater overlay points Linux installs at our own feed + pubkey;
+        # the signing key below makes the bundler emit .sig sidecars.
         # FUSE lines stay: linuxdeploy needs them whenever AppImage builds.
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
-        run: bunx tauri build --bundles appimage,deb
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: bunx tauri build --bundles appimage,deb --config src-tauri/tauri.linux-update.conf.json
 
       - name: Verify Linux artifacts
         working-directory: apps/examples/desktop-app
@@ -100,6 +103,16 @@ jobs:
             echo "no AppImage or deb produced under $BUNDLE_DIR"
             exit 1
           fi
+          # Updater artifacts must be signed or the feed cannot serve them.
+          shopt -s nullglob
+          TARBALLS=("$BUNDLE_DIR/appimage/"*.AppImage.tar.gz)
+          if [ ${#TARBALLS[@]} -eq 0 ]; then
+            echo "no AppImage updater tarball produced (updater overlay/key issue?)"
+            exit 1
+          fi
+          for f in "${TARBALLS[@]}"; do
+            [ -s "$f.sig" ] || { echo "missing signature for $f"; exit 1; }
+          done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

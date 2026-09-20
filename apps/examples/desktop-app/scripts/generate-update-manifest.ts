@@ -43,6 +43,16 @@ const WINDOWS_PLATFORM_KEYS_BY_ARCH_SUFFIX: Record<string, string[]> = {
 	arm64: ["windows-aarch64"],
 };
 
+// On Linux the updater artifact is the AppImage tarball
+// (`<Product>_<version>_<arch>.AppImage.tar.gz` plus a `.sig` sidecar),
+// emitted when the updater signing key is present at build time.
+const LINUX_PLATFORM_KEYS_BY_ARCH_SUFFIX: Record<string, string[]> = {
+	amd64: ["linux-x86_64"],
+	x86_64: ["linux-x86_64"],
+	aarch64: ["linux-aarch64"],
+	arm64: ["linux-aarch64"],
+};
+
 const getArgValue = (args: string[], name: string): string | undefined => {
 	const index = args.indexOf(name);
 	if (index >= 0 && args[index + 1] && !args[index + 1].startsWith("--")) {
@@ -67,6 +77,12 @@ const platformKeysOfUpdaterArtifact = (
 			(candidate) => fileName.endsWith(`_${candidate}-setup.exe`),
 		);
 		return arch ? WINDOWS_PLATFORM_KEYS_BY_ARCH_SUFFIX[arch] : undefined;
+	}
+	if (fileName.endsWith(".AppImage.tar.gz")) {
+		const arch = Object.keys(LINUX_PLATFORM_KEYS_BY_ARCH_SUFFIX).find(
+			(candidate) => fileName.includes(`_${candidate}.`),
+		);
+		return arch ? LINUX_PLATFORM_KEYS_BY_ARCH_SUFFIX[arch] : undefined;
 	}
 	return undefined;
 };
@@ -106,7 +122,7 @@ export const buildUpdateManifest = (options: {
 
 	if (Object.keys(platforms).length === 0) {
 		throw new Error(
-			`no updater artifacts (*.app.tar.gz or *-setup.exe with a known arch suffix) found in ${options.dir}`,
+			`no updater artifacts (*.app.tar.gz, *-setup.exe, or *.AppImage.tar.gz with a known arch suffix) found in ${options.dir}`,
 		);
 	}
 

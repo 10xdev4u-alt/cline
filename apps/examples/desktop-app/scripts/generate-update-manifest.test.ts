@@ -174,6 +174,47 @@ describe("buildUpdateManifest", () => {
 		).toThrow();
 	});
 
+	test("maps a Linux AppImage tarball to linux-x86_64", () => {
+		const dir = mkdtempSync(path.join(tmpdir(), "update-manifest-"));
+		writeFileSync(path.join(dir, "Cline_0.0.32_amd64.AppImage.tar.gz"), "tar");
+		writeFileSync(
+			path.join(dir, "Cline_0.0.32_amd64.AppImage.tar.gz.sig"),
+			"sig-linux\n",
+		);
+		writeFileSync(path.join(dir, "Cline_0.0.32_amd64.AppImage"), "appimage");
+		writeFileSync(path.join(dir, "Cline_0.0.32_amd64.deb"), "deb");
+		const manifest = buildUpdateManifest({
+			version: "0.0.32",
+			tag: "desktop-linux-v0.0.32",
+			dir,
+			repo: "10xdev4u-alt/cline",
+			notes: "notes",
+			pubDate: "2026-09-21T00:00:00.000Z",
+		});
+
+		expect(manifest.platforms["linux-x86_64"]).toEqual({
+			signature: "sig-linux",
+			url: "https://github.com/10xdev4u-alt/cline/releases/download/desktop-linux-v0.0.32/Cline_0.0.32_amd64.AppImage.tar.gz",
+		});
+		// Raw AppImage and deb are first-install artifacts, not updater ones.
+		expect(Object.keys(manifest.platforms)).toEqual(["linux-x86_64"]);
+	});
+
+	test("throws when a Linux AppImage tarball is missing its signature", () => {
+		const dir = mkdtempSync(path.join(tmpdir(), "update-manifest-"));
+		writeFileSync(path.join(dir, "Cline_0.0.32_amd64.AppImage.tar.gz"), "tar");
+		expect(() =>
+			buildUpdateManifest({
+				version: "0.0.32",
+				tag: "desktop-linux-v0.0.32",
+				dir,
+				repo: "10xdev4u-alt/cline",
+				notes: "notes",
+				pubDate: "2026-09-21T00:00:00.000Z",
+			}),
+		).toThrow();
+	});
+
 	test("throws when no updater artifacts exist", () => {
 		const dir = mkdtempSync(path.join(tmpdir(), "update-manifest-"));
 		writeFileSync(path.join(dir, "Cline-Code_0.1.0_aarch64.dmg"), "dmg");
