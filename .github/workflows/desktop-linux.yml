@@ -89,7 +89,7 @@ jobs:
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: bunx tauri build --bundles appimage,deb --config src-tauri/tauri.linux-update.conf.json
+        run: bunx tauri build --bundles appimage,deb --config src-tauri/tauri.release.conf.json --config src-tauri/tauri.linux-update.conf.json
 
       - name: Verify Linux artifacts
         working-directory: apps/examples/desktop-app
