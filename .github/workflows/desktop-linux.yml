@@ -1,0 +1,92 @@
+name: desktop-linux
+
+# Linux desktop bundles (AppImage + deb), built without any signing secrets.
+# Deliberately standalone: the guarded desktop-publish pipeline (macOS/Windows,
+# PublishDesktop environment) is untouched. Updater feed wiring
+# (generate-update-manifest.ts Linux entries) and aarch64 are follow-upside;
+# artifacts here are distributed via GitHub releases / the download site.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - linux-desktop
+      - "feat/desktop-linux-*"
+    paths:
+      - "apps/examples/desktop-app/**"
+      - ".github/workflows/desktop-linux.yml"
+  pull_request:
+    branches:
+      - linux-desktop
+    paths:
+      - "apps/examples/desktop-app/**"
+      - ".github/workflows/desktop-linux.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux-x64:
+    name: Build Linux (x64, AppImage + deb)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Tauri Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libgtk-3-dev
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.13"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: bun install
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build SDK packages
+        run: bun run build:sdk
+
+      - name: Build Linux desktop bundles
+        working-directory: apps/examples/desktop-app
+        run: bunx tauri build --bundles appimage,deb
+
+      - name: Verify Linux artifacts
+        working-directory: apps/examples/desktop-app
+        run: |
+          BUNDLE_DIR="src-tauri/target/release/bundle"
+          echo "--- appimage ---"
+          ls -lh "$BUNDLE_DIR/appimage" || echo "no appimage dir"
+          echo "--- deb ---"
+          ls -lh "$BUNDLE_DIR/deb" || echo "no deb dir"
+          if ! ls "$BUNDLE_DIR/appimage/"*.AppImage >/dev/null 2>&1 && ! ls "$BUNDLE_DIR/deb/"*.deb >/dev/null 2>&1; then
+            echo "no AppImage or deb produced under $BUNDLE_DIR"
+            exit 1
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-linux-x64
+          retention-days: 30
+          path: |
+            apps/examples/desktop-app/src-tauri/target/release/bundle/appimage/*.AppImage
+            apps/examples/desktop-app/src-tauri/target/release/bundle/deb/*.deb
+          if-no-files-found: error
