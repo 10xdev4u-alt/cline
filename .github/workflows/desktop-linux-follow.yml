@@ -140,7 +140,8 @@ jobs:
         working-directory: apps/examples/desktop-app
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
-        run: bunx tauri build --bundles appimage,deb
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: bunx tauri build --bundles appimage,deb --config src-tauri/tauri.linux-update.conf.json
 
       - name: Publish release with evergreen asset names
         if: steps.detect.outputs.pending != ''
@@ -152,17 +153,48 @@ jobs:
           OUT="$RUNNER_TEMP/linux-rel"
           mkdir -p "$OUT"
           DEB=$(find "$BUNDLE_DIR/deb" -name '*.deb' -print -quit)
-          APP=$(find "$BUNDLE_DIR/appimage" -name '*.AppImage' -print -quit)
+          APP=$(find "$BUNDLE_DIR/appimage" -name '*.AppImage' ! -name '*.tar.gz' -print -quit)
+          TAR=$(find "$BUNDLE_DIR/appimage" -name '*.AppImage.tar.gz' -print -quit)
           [ -n "$DEB" ] || { echo "no deb produced"; exit 1; }
           [ -n "$APP" ] || { echo "no AppImage produced"; exit 1; }
-          # Unversioned names keep site links evergreen across releases.
+          [ -n "$TAR" ] || { echo "no AppImage updater tarball produced (overlay/key issue?)"; exit 1; }
+          [ -s "$TAR.sig" ] || { echo "missing updater signature for $TAR"; exit 1; }
+          # Unversioned names keep site links evergreen across releases; the
+          # versioned updater tarball + sig stay versioned for the feed.
           cp "$DEB" "$OUT/Cline_amd64.deb"
           cp "$APP" "$OUT/Cline_amd64.AppImage"
-          (cd "$OUT" && sha256sum Cline_amd64.deb Cline_amd64.AppImage > SHA256SUMS)
+          cp "$TAR" "$OUT/"
+          cp "$TAR.sig" "$OUT/"
+          (cd "$OUT" && sha256sum Cline_amd64.deb Cline_amd64.AppImage *.AppImage.tar.gz > SHA256SUMS)
           TAG="desktop-linux-v$VERSION"
           git tag "$TAG"
           git push origin "$TAG"
           gh release create "$TAG" --target linux-desktop \
             --title "Cline Desktop for Linux v$VERSION" \
-            --notes "Auto-built from upstream \`desktop-v$VERSION\` plus the linux-desktop pipeline. Install: \`sudo apt install ./Cline_amd64.deb\` or \`chmod +x Cline_amd64.AppImage && ./Cline_amd64.AppImage\`. Verify with SHA256SUMS. No auto-updates yet — re-download on new releases." \
-            "$OUT/Cline_amd64.deb" "$OUT/Cline_amd64.AppImage" "$OUT/SHA256SUMS"
+            --notes "Auto-built from upstream \`desktop-v$VERSION\` plus the linux-desktop pipeline. Install: \`sudo apt install ./Cline_amd64.deb\` or \`chmod +x Cline_amd64.AppImage && ./Cline_amd64.AppImage\`. Verify with SHA256SUMS. Installed apps auto-update from the linux-latest feed." \
+            "$OUT/Cline_amd64.deb" "$OUT/Cline_amd64.AppImage" "$OUT/$(basename "$TAR")" "$OUT/$(basename "$TAR").sig" "$OUT/SHA256SUMS"
+
+      - name: Refresh linux-latest updater feed
+        if: steps.detect.outputs.pending != ''
+        env:
+          VERSION: ${{ steps.detect.outputs.pending }}
+        working-directory: apps/examples/desktop-app
+        run: |
+          OUT="$RUNNER_TEMP/linux-rel"
+          printf 'Cline Desktop for Linux v%s (auto-built).\n' "$VERSION" > "$RUNNER_TEMP/rel-notes.md"
+          bun scripts/generate-update-manifest.ts \
+            --version "$VERSION" \
+            --tag "desktop-linux-v$VERSION" \
+            --dir "$OUT" \
+            --out "$OUT/latest.json" \
+            --repo "$GITHUB_REPOSITORY" \
+            --notes-file "$RUNNER_TEMP/rel-notes.md"
+          cat "$OUT/latest.json"
+          if ! gh release view linux-latest >/dev/null 2>&1; then
+            gh release create linux-latest \
+              --title "Cline desktop Linux (auto-update feed)" \
+              --notes "Rolling release backing the Linux desktop auto-updater. Do not delete." \
+              --latest=false \
+              --target linux-desktop
+          fi
+          gh release upload linux-latest "$OUT/latest.json" --clobber

@@ -1,0 +1,11 @@
+{
+	"$schema": "https://schema.tauri.app/config/2",
+	"plugins": {
+		"updater": {
+			"pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk1N0VFNDUyN0FBNkExMApSV1FRYXFvblJlNVhDUzR5bEh3bXVrQUdIcXhiYml5TzlRQXk5YzFvN1RGSm11OU9VK3UvSWx5Two=",
+			"endpoints": [
+				"https://github.com/10xdev4u-alt/cline/releases/download/linux-latest/latest.json"
+			]
+		}
+	}
+}
