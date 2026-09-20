@@ -1,0 +1,19 @@
+{
+	"$schema": "https://schema.tauri.app/config/2",
+	"bundle": {
+		// Linux-only overlay, layered over tauri.conf.json at build time:
+		//   tauri build --config src-tauri/tauri.linux.conf.json
+		// Scopes bundled resources to this architecture. The base config's
+		// `bin/remote-helpers/*` glob pulls in foreign-arch helpers (e.g. the
+		// aarch64 helper into x64 bundles); linuxdeploy's gtk plugin runs
+		// `ldd` over every ELF in the AppDir and aborts on unrunnable ones,
+		// which fails the whole AppImage bundle. The sidecar resolves helpers
+		// per target triple at runtime, so shipping only the host-arch
+		// helper is correct. (An aarch64 Linux build needs its own overlay.)
+		"resources": [
+			"icons/app/*.png",
+			"icons/app/macos/*.png",
+			"bin/remote-helpers/cline-remote-helper-x86_64-unknown-linux-gnu"
+		]
+	}
+}
