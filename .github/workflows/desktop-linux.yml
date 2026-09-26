@@ -144,18 +144,29 @@ jobs:
           echo "ok: .dynstr is covered by a PT_LOAD segment"
 
           # The loader crash is silent at runtime, so prove the payload boots.
-          if ! timeout 20 "$SIDECAR" >sidecar-probe.log 2>&1; then
-            echo "::error::sidecar exited nonzero within 20s"
-            cat sidecar-probe.log
+          # The sidecar is a long-running daemon, not a one-shot command: it
+          # stays up serving 127.0.0.1:3126, so its exit status says nothing.
+          # Gate on the ready handshake instead, and reap it ourselves.
+          "$SIDECAR" >sidecar-probe.log 2>&1 &
+          SIDECAR_PID=$!
+          trap 'kill "$SIDECAR_PID" 2>/dev/null || true' EXIT
+
+          READY=0
+          for _ in $(seq 1 30); do
+            if grep -q '"type":"ready"' sidecar-probe.log; then READY=1; break; fi
+            kill -0 "$SIDECAR_PID" 2>/dev/null || break
+            sleep 1
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            echo "::error::sidecar did not report ready within 30s"
+            [ -s sidecar-probe.log ] && cat sidecar-probe.log
             exit 1
           fi
-          grep -q '"type":"ready"' sidecar-probe.log || {
-            echo "::error::sidecar did not report ready"
-            cat sidecar-probe.log
-            exit 1
-          }
           echo "ok: sidecar reached ready state"
           cat sidecar-probe.log
+          kill "$SIDECAR_PID" 2>/dev/null || true
+          wait "$SIDECAR_PID" 2>/dev/null || true
 
       - name: Report bundled WebKitGTK version
         # The AppImage ships this libwebkit2gtk, so its version decides which
