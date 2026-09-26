@@ -74,41 +74,9 @@ jobs:
       - name: Build SDK packages
         run: bun run build:sdk
 
-      - name: Pre-set payload RUNPATH before bundling
-        # linuxdeploy rewrites every AppDir executable with
-        #   patchelf --set-rpath '$ORIGIN/../lib' <binary>
-        # Applied to a Bun single-file executable that has no RUNPATH yet,
-        # that rewrite can leave .dynstr outside every PT_LOAD segment. The
-        # binary still links and still passes `ldd`, but glibc's loader
-        # segfaults before main(), so code-sidecar dies instantly and the app
-        # is a window with no backend. v0.0.32 shipped exactly that.
-        #
-        # Reproduced in isolation: a raw `bun build --compile` binary goes from
-        # 4 LOAD / .dynstr mapped to 5 LOAD / .dynstr unmapped across
-        # linuxdeploy's patchelf pass, growing by exactly one 4 KiB segment.
-        # The same pass over a binary that already carries the target RUNPATH
-        # is a no-op and leaves it byte-identical.
-        #
-        # So set the RUNPATH here, while we control the invocation, and let
-        # linuxdeploy find nothing to change. "Verify payload ELF integrity"
-        # below is what actually proves this worked.
-        working-directory: apps/examples/desktop-app
-        run: |
-          set -euo pipefail
-          command -v patchelf >/dev/null || { echo "::error::patchelf missing"; exit 1; }
-          shopt -s nullglob
-          PAYLOADS=(src-tauri/bin/code-sidecar-* src-tauri/bin/remote-helpers/cline-remote-helper-*)
-          [ ${#PAYLOADS[@]} -ge 1 ] || { echo "::error::no payloads to patch"; exit 1; }
-          for p in "${PAYLOADS[@]}"; do
-            before=$(stat -c%s "$p")
-            patchelf --set-rpath '$ORIGIN/../lib' "$p"
-            printf '  %-58s %s -> %s bytes\n' "$(basename "$p")" "$before" "$(stat -c%s "$p")"
-            readelf -lW "$p" | sed -n '/Section to Segment/,$p' | grep -q '\.dynstr' || {
-              echo "::error::pre-patching $p already orphaned .dynstr; refusing to bundle"
-              exit 1
-            }
-          done
-          echo "ok: payloads carry RUNPATH and remain loadable"
+      # The payload RUNPATH is set by scripts/build-sidecar-bin.ts, right after
+      # `bun build --compile`, because the sidecar does not exist until Tauri's
+      # beforeBuildCommand runs inside the bundle step below.
 
       - name: Install ldd shim for payload binaries
         # linuxdeploy ldds every AppDir executable and aborts the bundle on
