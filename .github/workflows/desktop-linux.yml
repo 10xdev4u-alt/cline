@@ -129,6 +129,45 @@ jobs:
             [ -s "$f.sig" ] || { echo "missing updater signature for $f"; exit 1; }
           done
 
+      - name: Drop conflicting GL client libs and polish the deb
+        # Same two problems as the AppImage: the deb bundles Ubuntu's
+        # libwayland-* next to the host's EGL, which aborts the renderer, and it
+        # inherits Tauri's empty Categories= with no AppStream metadata.
+        working-directory: apps/examples/desktop-app
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          DEBS=(src-tauri/target/release/bundle/deb/*.deb)
+          [ ${#DEBS[@]} -ge 1 ] || { echo "::error::no deb"; exit 1; }
+          DEB="${DEBS[0]}"
+          WORK="$(mktemp -d)"
+          ( cd "$WORK" && ar x "$OLDPWD/$DEB" )
+          DATA="$(ls "$WORK"/data.tar.* | head -1)"
+          mkdir "$WORK/pkg"
+          tar xf "$DATA" -C "$WORK/pkg"
+          rm -f "$DATA"
+
+          removed=0
+          for l in libwayland-client.so.0 libwayland-egl.so.1 libwayland-cursor.so.0 libwayland-server.so.0; do
+            while IFS= read -r f; do rm -f "$f"; removed=$((removed+1)); done \
+              < <(find "$WORK/pkg" -name "$l" -type f)
+          done
+          echo "removed $removed conflicting GL client libraries"
+          [ "$removed" -ge 1 ] || echo "::warning::none found; already clean?"
+
+          scripts/ci/polish-linux-tree.sh "$WORK/pkg"
+
+          tar czf "$WORK/data.tar.gz" -C "$WORK/pkg" .
+          # Preserve the control tarball under whatever name ar gave it.
+          CONTROL="$(ls "$WORK"/control.tar.* 2>/dev/null | head -1)"
+          [ -n "$CONTROL" ] || { echo "::error::control tarball missing"; exit 1; }
+          CONTROL_NAME="$(basename "$CONTROL")"
+          printf '2.0\n' > "$WORK/debian-binary"
+          rm -f "$WORK/debian-binary.old"
+          ( cd "$WORK" && ar rc "$OLDPWD/$DEB" "debian-binary" "$CONTROL_NAME" "data.tar.gz" )
+          echo "repacked $DEB ($(stat -c%s "$DEB") bytes)"
+          rm -rf "$WORK"
+
       - name: Drop conflicting GL client libs from the AppImage
         # The AppImage bundles Ubuntu's libwayland-client/libwayland-egl while
         # taking EGL, GLX and libgbm from the host. On a current distro those
@@ -187,6 +226,10 @@ jobs:
           done
           echo "removed $removed conflicting GL client libraries"
           [ "$removed" -ge 1 ] || echo "::warning::no conflicting libraries found; already clean?"
+
+          # Tauri's freedesktop template emits an empty Categories= and ships no
+          # AppStream metadata; see scripts/ci/polish-linux-tree.sh.
+          scripts/ci/polish-linux-tree.sh "$WORK/root"
 
           mksquashfs "$WORK/root" "$WORK/payload" -comp zstd -b 131072 -all-root -no-xattrs -noappend -quiet
           cat "$WORK/runtime" "$WORK/payload" > "$APP"
