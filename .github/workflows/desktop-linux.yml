@@ -27,7 +27,13 @@ permissions:
 jobs:
   build-linux-x64:
     name: Build Linux (x64, AppImage + deb)
-    runs-on: ubuntu-22.04
+    # ubuntu-24.04 (noble) ships webkit2gtk 2.44; ubuntu-22.04 (jammy) ships
+    # 2.36. The bundled libwebkit2gtk-4.1 is what the AppImage ships, so an old
+    # one is baked into every release. 2.36 fails eglInitialize() with
+    # EGL_BAD_PARAMETER against current Mesa (>=24), and libwebkit2gtk calls
+    # abort() on that failure — WebKitWebProcess dies and the window stays
+    # blank. See the "Verify payload ELF integrity" step below.
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - name: Checkout code
@@ -35,7 +41,7 @@ jobs:
 
       - name: Install Tauri Linux system dependencies
         # libfuse2: linuxdeploy ships as an AppImage itself and needs FUSE
-        # at bundle time; ubuntu-22.04 runners don't include it.
+        # at bundle time; GitHub-hosted runners don't include it.
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -69,7 +75,7 @@ jobs:
 
       - name: Install ldd shim for payload binaries
         # linuxdeploy ldds every AppDir executable and aborts the bundle on
-        # any nonzero exit. Bun-compiled payloads fail Ubuntu 22.04's ldd
+        # any nonzero exit. Bun-compiled payloads fail the runner's ldd
         # (see scripts/ci/ldd-payload-shim.sh); the shim masks exactly those.
         run: |
           chmod +x apps/examples/desktop-app/scripts/ci/ldd-payload-shim.sh
@@ -117,6 +123,46 @@ jobs:
             esac
             [ -s "$f.sig" ] || { echo "missing updater signature for $f"; exit 1; }
           done
+
+      - name: Verify payload ELF integrity
+        # Guards a shipped bug class: a Bun payload whose .dynstr sits outside
+        # every PT_LOAD segment still links and lints clean, but glibc's loader
+        # segfaults on it before main(), so the whole backend dies silently and
+        # the app is an empty window. v0.0.32 shipped exactly that.
+        working-directory: apps/examples/desktop-app
+        run: |
+          set -euo pipefail
+          SIDECAR="src-tauri/bin/code-sidecar-x86_64-unknown-linux-gnu"
+          [ -x "$SIDECAR" ] || { echo "sidecar not built at $SIDECAR"; exit 1; }
+
+          if ! readelf -lW "$SIDECAR" | sed -n '/Section to Segment/,$p' | grep -q '\.dynstr'; then
+            echo "::error::.dynstr is mapped into no PT_LOAD segment in $SIDECAR."
+            echo "::error::glibc's loader will segfault on this binary; the backend cannot start."
+            readelf -lW "$SIDECAR" | head -20
+            exit 1
+          fi
+          echo "ok: .dynstr is covered by a PT_LOAD segment"
+
+          # The loader crash is silent at runtime, so prove the payload boots.
+          if ! timeout 20 "$SIDECAR" >sidecar-probe.log 2>&1; then
+            echo "::error::sidecar exited nonzero within 20s"
+            cat sidecar-probe.log
+            exit 1
+          fi
+          grep -q '"type":"ready"' sidecar-probe.log || {
+            echo "::error::sidecar did not report ready"
+            cat sidecar-probe.log
+            exit 1
+          }
+          echo "ok: sidecar reached ready state"
+          cat sidecar-probe.log
+
+      - name: Report bundled WebKitGTK version
+        # The AppImage ships this libwebkit2gtk, so its version decides which
+        # EGL/Mesa combinations work on user machines. Record it per build.
+        working-directory: apps/examples/desktop-app
+        run: |
+          dpkg-query -W -f='${Version}\n' libwebkit2gtk-4.1-0 2>/dev/null || echo "unknown"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
