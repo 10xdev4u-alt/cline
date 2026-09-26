@@ -129,6 +129,71 @@ jobs:
             [ -s "$f.sig" ] || { echo "missing updater signature for $f"; exit 1; }
           done
 
+      - name: Drop conflicting GL client libs from the AppImage
+        # The AppImage bundles Ubuntu's libwayland-client/libwayland-egl while
+        # taking EGL, GLX and libgbm from the host. On a current distro those
+        # two halves disagree: Mesa dlopens the bundled, older libwayland-egl,
+        # eglInitialize returns EGL_BAD_PARAMETER, and libwebkit2gtk calls
+        # abort() on that. WebKitWebProcess dies ~40s after launch and never
+        # respawns, leaving a permanently blank window.
+        #
+        #   Could not create default EGL display: EGL_BAD_PARAMETER. Aborting...
+        #
+        # The host's EGL stack is fine on its own (a standalone eglInitialize
+        # succeeds), and AppRun already forces GDK_BACKEND=x11, so the bundled
+        # Wayland client libraries are never used. Removing them lets Mesa use
+        # the host's coherent libwayland, and the renderer survives.
+        #
+        # Repack rather than patch in place: AppImage is runtime + squashfs.
+        working-directory: apps/examples/desktop-app
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          APPS=(src-tauri/target/release/bundle/appimage/*.AppImage)
+          [ ${#APPS[@]} -ge 1 ] || { echo "::error::no AppImage"; exit 1; }
+          APP="${APPS[0]}"
+
+          command -v mksquashfs >/dev/null || { echo "::error::mksquashfs missing"; exit 1; }
+          command -v unsquashfs >/dev/null || { echo "::error::unsquashfs missing"; exit 1; }
+
+          # Split the runtime prefix off the front of the AppImage.
+          OFF=$(python3 - "$APP" <<'PY'
+          # "hsqs" also occurs by coincidence inside the runtime, so validate
+          # the superblock of every candidate and keep the one that is a real,
+          # 4-byte-aligned squashfs v4 image. A naive first-match lands ~750 KB
+          # early and produces an unbootable AppImage.
+          import struct, sys
+          d = open(sys.argv[1], "rb").read()
+          for off in range(0, len(d) - 32):
+              if d[off:off + 4] != b"hsqs" or off % 4:
+                  continue
+              major, minor = struct.unpack("<HH", d[off + 28: off + 32])
+              if (major, minor) == (4, 0):
+                  print(off)
+                  break
+          else:
+              raise SystemExit("no valid squashfs superblock found")
+          PY
+          )
+          echo "squashfs payload starts at $OFF"
+          WORK="$(mktemp -d)"
+          head -c "$OFF" "$APP" > "$WORK/runtime"
+          unsquashfs -f -d "$WORK/root" "$APP" >/dev/null 2>&1
+
+          removed=0
+          for l in libwayland-client.so.0 libwayland-egl.so.1 libwayland-cursor.so.0 libwayland-server.so.0; do
+            while IFS= read -r f; do rm -f "$f"; removed=$((removed+1)); done \
+              < <(find "$WORK/root" -name "$l" -type f)
+          done
+          echo "removed $removed conflicting GL client libraries"
+          [ "$removed" -ge 1 ] || echo "::warning::no conflicting libraries found; already clean?"
+
+          mksquashfs "$WORK/root" "$WORK/payload" -comp zstd -b 131072 -all-root -no-xattrs -noappend -quiet
+          cat "$WORK/runtime" "$WORK/payload" > "$APP"
+          chmod +x "$APP"
+          echo "repacked $APP ($(stat -c%s "$APP") bytes)"
+          rm -rf "$WORK"
+
       - name: Verify payload ELF integrity
         # Guards a shipped bug class: a Bun payload whose .dynstr sits outside
         # every PT_LOAD segment still links and lints clean, but glibc's loader
