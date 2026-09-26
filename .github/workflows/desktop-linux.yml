@@ -129,44 +129,62 @@ jobs:
         # every PT_LOAD segment still links and lints clean, but glibc's loader
         # segfaults on it before main(), so the whole backend dies silently and
         # the app is an empty window. v0.0.32 shipped exactly that.
+        #
+        # This must inspect the binary inside the built AppImage, not the one in
+        # src-tauri/bin. A single `tauri build --bundles appimage,deb` produces
+        # both packages from one AppDir, and the linuxdeploy pass mutates the
+        # payload in place: on linux-desktop HEAD the pre-bundle sidecar is
+        # healthy (4 LOAD, 9 phdr, .dynstr mapped) while the copy inside the
+        # AppImage is not (5 LOAD, 10 phdr, .dynstr unmapped). Checking only the
+        # pre-bundle file reports green on a release whose backend cannot start.
         working-directory: apps/examples/desktop-app
         run: |
           set -euo pipefail
-          SIDECAR="src-tauri/bin/code-sidecar-x86_64-unknown-linux-gnu"
-          [ -x "$SIDECAR" ] || { echo "sidecar not built at $SIDECAR"; exit 1; }
+          BUNDLE="src-tauri/target/release/bundle/appimage"
+          shopt -s nullglob
+          APPS=("$BUNDLE"/*.AppImage)
+          [ ${#APPS[@]} -ge 1 ] || { echo "::error::no AppImage to inspect"; exit 1; }
+          APP="${APPS[0]}"
 
-          if ! readelf -lW "$SIDECAR" | sed -n '/Section to Segment/,$p' | grep -q '\.dynstr'; then
-            echo "::error::.dynstr is mapped into no PT_LOAD segment in $SIDECAR."
-            echo "::error::glibc's loader will segfault on this binary; the backend cannot start."
+          WORK="$(mktemp -d)"
+          ( cd "$WORK" && APPIMAGE_EXTRACT_AND_RUN=0 "$OLDPWD/$APP" --appimage-extract >/dev/null )
+          SIDECAR="$WORK/squashfs-root/usr/bin/code-sidecar"
+          [ -x "$SIDECAR" ] || SIDECAR="$WORK/squashfs-root/usr/bin/code-sidecar-x86_64-unknown-linux-gnu"
+          [ -x "$SIDECAR" ] || { echo "::error::no sidecar inside $APP"; exit 1; }
+
+          readelf -lW "$SIDECAR" | sed -n '/Section to Segment/,$p' | grep -q '\.dynstr' || {
+            echo "::error::bundled $APP ships a sidecar whose .dynstr is in no PT_LOAD segment."
+            echo "::error::glibc's loader segfaults on this; the backend cannot start."
             readelf -lW "$SIDECAR" | head -20
             exit 1
-          fi
-          echo "ok: .dynstr is covered by a PT_LOAD segment"
+          }
+          echo "ok: bundled sidecar has .dynstr covered ($(readelf -lW "$SIDECAR" | grep -cE '^ *LOAD') LOAD segments)"
 
           # The loader crash is silent at runtime, so prove the payload boots.
           # The sidecar is a long-running daemon, not a one-shot command: it
           # stays up serving 127.0.0.1:3126, so its exit status says nothing.
           # Gate on the ready handshake instead, and reap it ourselves.
-          "$SIDECAR" >sidecar-probe.log 2>&1 &
+          "$SIDECAR" >"$WORK/probe.log" 2>&1 &
           SIDECAR_PID=$!
           trap 'kill "$SIDECAR_PID" 2>/dev/null || true' EXIT
 
           READY=0
           for _ in $(seq 1 30); do
-            if grep -q '"type":"ready"' sidecar-probe.log; then READY=1; break; fi
+            if grep -q '"type":"ready"' "$WORK/probe.log"; then READY=1; break; fi
             kill -0 "$SIDECAR_PID" 2>/dev/null || break
             sleep 1
           done
 
           if [ "$READY" -ne 1 ]; then
-            echo "::error::sidecar did not report ready within 30s"
-            [ -s sidecar-probe.log ] && cat sidecar-probe.log
+            echo "::error::bundled sidecar did not report ready within 30s"
+            [ -s "$WORK/probe.log" ] && cat "$WORK/probe.log"
             exit 1
           fi
-          echo "ok: sidecar reached ready state"
-          cat sidecar-probe.log
+          echo "ok: bundled sidecar reached ready state"
+          cat "$WORK/probe.log"
           kill "$SIDECAR_PID" 2>/dev/null || true
           wait "$SIDECAR_PID" 2>/dev/null || true
+          rm -rf "$WORK"
 
       - name: Report bundled WebKitGTK version
         # The AppImage ships this libwebkit2gtk, so its version decides which
