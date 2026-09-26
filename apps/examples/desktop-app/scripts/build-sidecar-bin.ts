@@ -2,6 +2,45 @@ import { fileURLToPath } from "node:url";
 import { $ } from "bun";
 import { telemetryDefineArgs } from "./telemetry-define-args";
 
+// AppImage bundling runs linuxdeploy, which rewrites every executable in the
+// AppDir with `patchelf --set-rpath '$ORIGIN/../lib' <binary>`. Applied to a
+// Bun single-file executable that has no RUNPATH yet, that rewrite can leave
+// .dynstr outside every PT_LOAD segment: the binary still links, still passes
+// ldd, and linuxdeploy is satisfied, but glibc's dynamic loader segfaults
+// before main() runs. The sidecar then dies instantly, nothing listens on
+// 127.0.0.1:3126, and the app is a window with no backend. v0.0.32 shipped
+// exactly that.
+//
+// Over a binary that already carries the target RUNPATH the same pass is a
+// no-op and leaves the file byte-identical, so set it here while we control
+// the invocation and let linuxdeploy find no change to make.
+const setBundleRunpath = async (outfile: string): Promise<void> => {
+	if (!Bun.which("patchelf")) {
+		if (process.env.CI) {
+			throw new Error(
+				`patchelf is required to set the bundle RUNPATH on ${outfile} but was not found on PATH`,
+			);
+		}
+		console.warn(
+			`patchelf not found on PATH; leaving ${outfile} without a RUNPATH (AppImage bundling may corrupt it)`,
+		);
+		return;
+	}
+	await $`patchelf --set-rpath '$ORIGIN/../lib' ${outfile}`;
+
+	// A payload that already lost .dynstr is unusable; fail loudly here rather
+	// than shipping an app whose backend cannot start.
+	const segments = await $`readelf -lW ${outfile}`.text();
+	const mapped = segments
+		.slice(segments.indexOf("Section to Segment mapping"))
+		.includes(".dynstr");
+	if (!mapped) {
+		throw new Error(
+			`setting the RUNPATH left .dynstr outside every PT_LOAD segment in ${outfile}; refusing to ship it`,
+		);
+	}
+};
+
 const resolveTargetTriple = async (): Promise<string> => {
 	const fromEnv = process.env.TAURI_ENV_TARGET_TRIPLE ?? process.env.TARGET;
 	if (fromEnv?.trim()) {
@@ -70,6 +109,7 @@ const buildSidecar = async (
 	} else {
 		await $`bun build ${entrypoint} --compile ${runtimeIsolationArgs} ${optimizationArgs} ${defines} --outfile ${outfile}`;
 	}
+	await setBundleRunpath(outfile);
 	return outfile;
 };
 

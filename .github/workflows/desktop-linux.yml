@@ -27,7 +27,13 @@ permissions:
 jobs:
   build-linux-x64:
     name: Build Linux (x64, AppImage + deb)
-    runs-on: ubuntu-22.04
+    # ubuntu-24.04 (noble) ships webkit2gtk 2.44; ubuntu-22.04 (jammy) ships
+    # 2.36. The bundled libwebkit2gtk-4.1 is what the AppImage ships, so an old
+    # one is baked into every release. 2.36 fails eglInitialize() with
+    # EGL_BAD_PARAMETER against current Mesa (>=24), and libwebkit2gtk calls
+    # abort() on that failure — WebKitWebProcess dies and the window stays
+    # blank. See the "Verify payload ELF integrity" step below.
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - name: Checkout code
@@ -35,7 +41,7 @@ jobs:
 
       - name: Install Tauri Linux system dependencies
         # libfuse2: linuxdeploy ships as an AppImage itself and needs FUSE
-        # at bundle time; ubuntu-22.04 runners don't include it.
+        # at bundle time; GitHub-hosted runners don't include it.
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -49,6 +55,7 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             libgtk-3-dev \
+            patchelf \
             libfuse2
 
       - name: Setup Bun
@@ -67,9 +74,13 @@ jobs:
       - name: Build SDK packages
         run: bun run build:sdk
 
+      # The payload RUNPATH is set by scripts/build-sidecar-bin.ts, right after
+      # `bun build --compile`, because the sidecar does not exist until Tauri's
+      # beforeBuildCommand runs inside the bundle step below.
+
       - name: Install ldd shim for payload binaries
         # linuxdeploy ldds every AppDir executable and aborts the bundle on
-        # any nonzero exit. Bun-compiled payloads fail Ubuntu 22.04's ldd
+        # any nonzero exit. Bun-compiled payloads fail the runner's ldd
         # (see scripts/ci/ldd-payload-shim.sh); the shim masks exactly those.
         run: |
           chmod +x apps/examples/desktop-app/scripts/ci/ldd-payload-shim.sh
@@ -117,6 +128,185 @@ jobs:
             esac
             [ -s "$f.sig" ] || { echo "missing updater signature for $f"; exit 1; }
           done
+
+      - name: Drop conflicting GL client libs and polish the deb
+        # Same two problems as the AppImage: the deb bundles Ubuntu's
+        # libwayland-* next to the host's EGL, which aborts the renderer, and it
+        # inherits Tauri's empty Categories= with no AppStream metadata.
+        working-directory: apps/examples/desktop-app
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          DEBS=(src-tauri/target/release/bundle/deb/*.deb)
+          [ ${#DEBS[@]} -ge 1 ] || { echo "::error::no deb"; exit 1; }
+          DEB="${DEBS[0]}"
+          WORK="$(mktemp -d)"
+          ( cd "$WORK" && ar x "$OLDPWD/$DEB" )
+          DATA="$(ls "$WORK"/data.tar.* | head -1)"
+          mkdir "$WORK/pkg"
+          tar xf "$DATA" -C "$WORK/pkg"
+          rm -f "$DATA"
+
+          removed=0
+          for l in libwayland-client.so.0 libwayland-egl.so.1 libwayland-cursor.so.0 libwayland-server.so.0; do
+            while IFS= read -r f; do rm -f "$f"; removed=$((removed+1)); done \
+              < <(find "$WORK/pkg" -name "$l" -type f)
+          done
+          echo "removed $removed conflicting GL client libraries"
+          [ "$removed" -ge 1 ] || echo "::warning::none found; already clean?"
+
+          scripts/ci/polish-linux-tree.sh "$WORK/pkg"
+
+          tar czf "$WORK/data.tar.gz" -C "$WORK/pkg" .
+          # Preserve the control tarball under whatever name ar gave it.
+          CONTROL="$(ls "$WORK"/control.tar.* 2>/dev/null | head -1)"
+          [ -n "$CONTROL" ] || { echo "::error::control tarball missing"; exit 1; }
+          CONTROL_NAME="$(basename "$CONTROL")"
+          printf '2.0\n' > "$WORK/debian-binary"
+          rm -f "$WORK/debian-binary.old"
+          ( cd "$WORK" && ar rc "$OLDPWD/$DEB" "debian-binary" "$CONTROL_NAME" "data.tar.gz" )
+          echo "repacked $DEB ($(stat -c%s "$DEB") bytes)"
+          rm -rf "$WORK"
+
+      - name: Drop conflicting GL client libs from the AppImage
+        # The AppImage bundles Ubuntu's libwayland-client/libwayland-egl while
+        # taking EGL, GLX and libgbm from the host. On a current distro those
+        # two halves disagree: Mesa dlopens the bundled, older libwayland-egl,
+        # eglInitialize returns EGL_BAD_PARAMETER, and libwebkit2gtk calls
+        # abort() on that. WebKitWebProcess dies ~40s after launch and never
+        # respawns, leaving a permanently blank window.
+        #
+        #   Could not create default EGL display: EGL_BAD_PARAMETER. Aborting...
+        #
+        # The host's EGL stack is fine on its own (a standalone eglInitialize
+        # succeeds), and AppRun already forces GDK_BACKEND=x11, so the bundled
+        # Wayland client libraries are never used. Removing them lets Mesa use
+        # the host's coherent libwayland, and the renderer survives.
+        #
+        # Repack rather than patch in place: AppImage is runtime + squashfs.
+        working-directory: apps/examples/desktop-app
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          APPS=(src-tauri/target/release/bundle/appimage/*.AppImage)
+          [ ${#APPS[@]} -ge 1 ] || { echo "::error::no AppImage"; exit 1; }
+          APP="${APPS[0]}"
+
+          command -v mksquashfs >/dev/null || { echo "::error::mksquashfs missing"; exit 1; }
+          command -v unsquashfs >/dev/null || { echo "::error::unsquashfs missing"; exit 1; }
+
+          # Split the runtime prefix off the front of the AppImage.
+          OFF=$(python3 - "$APP" <<'PY'
+          # "hsqs" also occurs by coincidence inside the runtime, so validate
+          # the superblock of every candidate and keep the one that is a real,
+          # 4-byte-aligned squashfs v4 image. A naive first-match lands ~750 KB
+          # early and produces an unbootable AppImage.
+          import struct, sys
+          d = open(sys.argv[1], "rb").read()
+          for off in range(0, len(d) - 32):
+              if d[off:off + 4] != b"hsqs" or off % 4:
+                  continue
+              major, minor = struct.unpack("<HH", d[off + 28: off + 32])
+              if (major, minor) == (4, 0):
+                  print(off)
+                  break
+          else:
+              raise SystemExit("no valid squashfs superblock found")
+          PY
+          )
+          echo "squashfs payload starts at $OFF"
+          WORK="$(mktemp -d)"
+          head -c "$OFF" "$APP" > "$WORK/runtime"
+          # The squashfs is not at offset 0; unsquashfs needs to be told where
+          # it starts, and its diagnostics must not be swallowed.
+          unsquashfs -f -o "$OFF" -d "$WORK/root" "$APP"
+
+          removed=0
+          for l in libwayland-client.so.0 libwayland-egl.so.1 libwayland-cursor.so.0 libwayland-server.so.0; do
+            while IFS= read -r f; do rm -f "$f"; removed=$((removed+1)); done \
+              < <(find "$WORK/root" -name "$l" -type f)
+          done
+          echo "removed $removed conflicting GL client libraries"
+          [ "$removed" -ge 1 ] || echo "::warning::no conflicting libraries found; already clean?"
+
+          # Tauri's freedesktop template emits an empty Categories= and ships no
+          # AppStream metadata; see scripts/ci/polish-linux-tree.sh.
+          scripts/ci/polish-linux-tree.sh "$WORK/root"
+
+          mksquashfs "$WORK/root" "$WORK/payload" -comp zstd -b 131072 -all-root -no-xattrs -noappend -quiet
+          cat "$WORK/runtime" "$WORK/payload" > "$APP"
+          chmod +x "$APP"
+          echo "repacked $APP ($(stat -c%s "$APP") bytes)"
+          rm -rf "$WORK"
+
+      - name: Verify payload ELF integrity
+        # Guards a shipped bug class: a Bun payload whose .dynstr sits outside
+        # every PT_LOAD segment still links and lints clean, but glibc's loader
+        # segfaults on it before main(), so the whole backend dies silently and
+        # the app is an empty window. v0.0.32 shipped exactly that.
+        #
+        # This must inspect the binary inside the built AppImage, not the one in
+        # src-tauri/bin. A single `tauri build --bundles appimage,deb` produces
+        # both packages from one AppDir, and the linuxdeploy pass mutates the
+        # payload in place: on linux-desktop HEAD the pre-bundle sidecar is
+        # healthy (4 LOAD, 9 phdr, .dynstr mapped) while the copy inside the
+        # AppImage is not (5 LOAD, 10 phdr, .dynstr unmapped). Checking only the
+        # pre-bundle file reports green on a release whose backend cannot start.
+        working-directory: apps/examples/desktop-app
+        run: |
+          set -euo pipefail
+          BUNDLE="src-tauri/target/release/bundle/appimage"
+          shopt -s nullglob
+          APPS=("$BUNDLE"/*.AppImage)
+          [ ${#APPS[@]} -ge 1 ] || { echo "::error::no AppImage to inspect"; exit 1; }
+          APP="${APPS[0]}"
+
+          WORK="$(mktemp -d)"
+          ( cd "$WORK" && APPIMAGE_EXTRACT_AND_RUN=0 "$OLDPWD/$APP" --appimage-extract >/dev/null )
+          SIDECAR="$WORK/squashfs-root/usr/bin/code-sidecar"
+          [ -x "$SIDECAR" ] || SIDECAR="$WORK/squashfs-root/usr/bin/code-sidecar-x86_64-unknown-linux-gnu"
+          [ -x "$SIDECAR" ] || { echo "::error::no sidecar inside $APP"; exit 1; }
+
+          readelf -lW "$SIDECAR" | sed -n '/Section to Segment/,$p' | grep -q '\.dynstr' || {
+            echo "::error::bundled $APP ships a sidecar whose .dynstr is in no PT_LOAD segment."
+            echo "::error::glibc's loader segfaults on this; the backend cannot start."
+            readelf -lW "$SIDECAR" | head -20
+            exit 1
+          }
+          echo "ok: bundled sidecar has .dynstr covered ($(readelf -lW "$SIDECAR" | grep -cE '^ *LOAD') LOAD segments)"
+
+          # The loader crash is silent at runtime, so prove the payload boots.
+          # The sidecar is a long-running daemon, not a one-shot command: it
+          # stays up serving 127.0.0.1:3126, so its exit status says nothing.
+          # Gate on the ready handshake instead, and reap it ourselves.
+          "$SIDECAR" >"$WORK/probe.log" 2>&1 &
+          SIDECAR_PID=$!
+          trap 'kill "$SIDECAR_PID" 2>/dev/null || true' EXIT
+
+          READY=0
+          for _ in $(seq 1 30); do
+            if grep -q '"type":"ready"' "$WORK/probe.log"; then READY=1; break; fi
+            kill -0 "$SIDECAR_PID" 2>/dev/null || break
+            sleep 1
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            echo "::error::bundled sidecar did not report ready within 30s"
+            [ -s "$WORK/probe.log" ] && cat "$WORK/probe.log"
+            exit 1
+          fi
+          echo "ok: bundled sidecar reached ready state"
+          cat "$WORK/probe.log"
+          kill "$SIDECAR_PID" 2>/dev/null || true
+          wait "$SIDECAR_PID" 2>/dev/null || true
+          rm -rf "$WORK"
+
+      - name: Report bundled WebKitGTK version
+        # The AppImage ships this libwebkit2gtk, so its version decides which
+        # EGL/Mesa combinations work on user machines. Record it per build.
+        working-directory: apps/examples/desktop-app
+        run: |
+          dpkg-query -W -f='${Version}\n' libwebkit2gtk-4.1-0 2>/dev/null || echo "unknown"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
