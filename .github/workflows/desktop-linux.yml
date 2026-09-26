@@ -217,7 +217,9 @@ jobs:
           echo "squashfs payload starts at $OFF"
           WORK="$(mktemp -d)"
           head -c "$OFF" "$APP" > "$WORK/runtime"
-          unsquashfs -f -d "$WORK/root" "$APP" >/dev/null 2>&1
+          # The squashfs is not at offset 0; unsquashfs needs to be told where
+          # it starts, and its diagnostics must not be swallowed.
+          unsquashfs -f -o "$OFF" -d "$WORK/root" "$APP"
 
           removed=0
           for l in libwayland-client.so.0 libwayland-egl.so.1 libwayland-cursor.so.0 libwayland-server.so.0; do
